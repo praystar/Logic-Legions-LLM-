@@ -1,0 +1,275 @@
+import requests
+from bs4 import BeautifulSoup
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+# Define device for torch operations
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+# Function to scrape a website and return its text
+def scrape_website(url):
+    req = requests.get(url)
+    soup = BeautifulSoup(req.content, "html.parser")
+    return soup.get_text()
+
+# List of URLs to scrape
+websites = [
+    'https://developer.mozilla.org/en-US/docs/Web/JavaScript',
+    'https://react.dev/reference/react',
+    'https://nodejs.org/docs/latest/api/',
+    'https://docs.npmjs.com',
+    'https://mongoosejs.com/docs/guide.html',
+    'https://expressjs.com/',
+    'https://nextjs.org/docs',
+    'https://axios-http.com/docs/intro',
+    'https://tailwindcss.com/docs',
+    'https://vitejs.dev/guide/'
+]
+dataset = ''
+for url in websites:
+    print(f"Scraping {url}:")
+    dataset += scrape_website(url)
+    print("\n\n")
+# Placeholder variables
+chars = sorted(list(set(dataset)))
+vocab_size = len(chars)
+n_embd = 512
+n_head = 8
+n_layer = 6
+block_size = 128
+dropout = 0.1
+learning_rate = 5
+max_iters = 100
+eval_interval = 100
+eval_iters = 10
+batch_size = 32
+
+# Placeholder function for preprocessing and encoding
+def preprocess_and_encode(dataset, split):
+    global chars, vocab_size
+    chars = sorted(list(set(dataset)))
+    vocab_size = len(chars)
+    stoi = { ch:i for i,ch in enumerate(chars) }
+    itos = { i:ch for i,ch in enumerate(chars) }
+    encode = lambda s: [stoi[c] for c in s] # encoder: take a string, output a list of integers
+    decode = lambda l: ''.join([itos[i] for i in l]) # decoder: take a list of integers, output a string
+    dataset = [encode(s) for s in dataset]
+    return dataset
+
+def decode():
+    decode = lambda l: ''.join([itos[i] for i in l]) # decoder: take a list of integers, output a string
+    return
+
+
+# Placeholder function for training the LLM
+def train_llm(dataset):
+    # ... (your existing code)
+    if iter % eval_interval == 0 or iter == max_iters - 1:
+        losses = estimate_loss()  # Call estimate_loss to get losses
+        print(f"step {iter}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
+    # ... (rest of your code)
+
+
+# Placeholder function for data loading
+def get_batch(split):
+    data = torch.tensor(preprocess_and_encode(dataset, split), dtype=torch.long)
+    n = int(0.9 * len(data))  # first 90% will be train, rest val
+
+    if split == 'train':
+        train_data = data[:n]
+        X, Y = train_data[:, :-1], train_data[:, 1:]  # Return X and Y
+        return X, Y
+    else:
+        val_data = data[n:]
+        # Return a single batch from the validation data
+        return val_data[:batch_size], None  # Modify here to return None as the second value
+
+
+
+
+
+
+# Placeholder function for estimating loss
+
+@torch.no_grad()
+def estimate_loss():
+    losses = {}  # Initialize the losses dictionary here
+    global split  # Access globally if needed
+    model.eval()
+    for split in ['train', 'val']:
+        total_loss = 0.0
+        for k in range(eval_iters):
+            X, Y = get_batch(split)  # Get the batch for the current split
+            logits, loss = model(X, Y)  # Compute logits and loss
+            if loss is not None:
+                total_loss += loss.item()  # Accumulate the loss only if it's not None
+        losses[split] = total_loss / eval_iters  # Compute the average loss
+    model.train()
+    return losses  # Return the dictionary of losses
+
+
+
+
+class Head(nn.Module):
+    """ one head of self-attention """
+
+    def __init__(self, head_size):
+        super().__init__()
+        self.key = nn.Linear(n_embd, head_size, bias=False)
+        self.query = nn.Linear(n_embd, head_size, bias=False)
+        self.value = nn.Linear(n_embd, head_size, bias=False)
+        self.register_buffer('tril', torch.tril(torch.ones(block_size, block_size)))
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x):
+        B,T,C = x.shape
+        k = self.key(x)   # (B,T,C)
+        q = self.query(x) # (B,T,C)
+        wei = q @ k.transpose(-2,-1) * C**-0.5 # (B, T, C) @ (B, C, T) -> (B, T, T)
+        wei = wei.masked_fill(self.tril[:T, :T] == 0, float('-inf')) # (B, T, T)
+        wei = F.softmax(wei, dim=-1) # (B, T, T)
+        wei = self.dropout(wei)
+        v = self.value(x) # (B,T,C)
+        out = wei @ v # (B, T, T) @ (B, T, C) -> (B, T, C)
+        return out
+
+class MultiHeadAttention(nn.Module):
+    """ multiple heads of self-attention in parallel """
+
+    def __init__(self, num_heads, head_size):
+        super().__init__()
+        self.heads = nn.ModuleList([Head(head_size) for _ in range(num_heads)])
+        self.proj = nn.Linear(n_embd, n_embd)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x):
+        out = torch.cat([h(x) for h in self.heads], dim=-1)
+        out = self.dropout(self.proj(out))
+        return out
+
+class FeedForward(nn.Module):
+    """ a simple linear layer followed by a non-linearity """
+
+    def __init__(self, n_embd):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(n_embd, 4 * n_embd),
+            nn.ReLU(),
+            nn.Linear(4 * n_embd, n_embd),
+            nn.Dropout(dropout),
+        )
+
+    def forward(self, x):
+        return self.net(x)
+
+class Block(nn.Module):
+    """ Transformer block: communication followed by computation """
+
+    def __init__(self, n_embd, n_head):
+        super().__init__()
+        head_size = n_embd // n_head
+        self.sa = MultiHeadAttention(n_head, head_size)
+        self.ffwd = FeedForward(n_embd)
+        self.ln1 = nn.LayerNorm(n_embd)
+        self.ln2 = nn.LayerNorm(n_embd)
+
+    def forward(self, x):
+        x = x + self.sa(self.ln1(x))
+        x = x + self.ffwd(self.ln2(x))
+        return x
+
+class BigramLanguageModel(nn.Module):
+
+    def __init__(self):
+        super().__init__()
+        # Ensure vocab_size is initialized
+        global vocab_size
+
+        self.token_embedding_table = nn.Embedding(vocab_size, n_embd)
+        self.position_embedding_table = nn.Embedding(block_size, n_embd)
+        self.blocks = nn.Sequential(*[Block(n_embd, n_head=n_head) for _ in range(n_layer)])
+        self.ln_f = nn.LayerNorm(n_embd)
+        self.lm_head = nn.Linear(n_embd, vocab_size)
+
+    def forward(self, idx, targets=None):
+        B, T = idx.shape
+        tok_emb = self.token_embedding_table(idx)
+        pos_emb = self.position_embedding_table(torch.arange(T, device=device))
+        x = tok_emb + pos_emb
+        x = self.blocks(x)
+        x = self.ln_f(x)
+        logits = self.lm_head(x)
+
+        if targets is None:
+            loss = None
+        else:
+            B, T, C = logits.shape
+            logits = logits.view(B*T, C)
+            targets = targets.view(B*T)
+            loss = F.cross_entropy(logits, targets)
+
+        return logits, loss
+
+    def generate(self, idx, max_new_tokens):
+        for _ in range(max_new_tokens):
+            idx_cond = idx[:, -block_size:]
+            logits, loss = self(idx_cond)
+            logits = logits[:, -1, :]
+            probs = F.softmax(logits, dim=-1)
+            idx_next = torch.multinomial(probs, num_samples=1)
+            idx = torch.cat((idx, idx_next), dim=1)
+        return idx
+
+model = BigramLanguageModel()
+model = model.to(device)
+print(sum(p.numel() for p in model.parameters())/1e6, 'M parameters')
+
+optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
+
+for iter in range(max_iters):
+
+    if iter % eval_interval == 0 or iter == max_iters - 1:
+        losses = estimate_loss()
+        print(f"step {iter}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
+
+    xb, yb = get_batch('train')
+
+    logits, loss = model(xb, yb)
+    optimizer.zero_grad(set_to_none=True)
+    loss.backward()
+    optimizer.step()
+
+# Placeholder function for generating response using the trained LLM
+# Updated generate_response function to print the decoded response
+def generate_response(prompt):
+    context = torch.zeros((1, 1), dtype=torch.long, device=device)
+    decoded_response = decode(model.generate(context, max_new_tokens=2000)[0].tolist())
+    print(decoded_response)
+
+
+# Function to interact with the trained LLM
+def chat_with_llm():
+    print("Welcome to the Chatbot. Type 'quit' to exit.")
+    while True:
+        user_input = input("You: ")
+        if user_input.lower() == 'quit':
+            print("Chatbot: Goodbye!")
+            break
+        response = generate_response(user_input)
+        print(f"Chatbot: {decoded_response}")
+
+# Main function
+def main():
+    dataset = ''
+    for url in websites:
+        print(f"Scraping {url}:")
+        dataset += scrape_website(url)
+        print("\n\n")
+
+    processed_dataset = preprocess_and_encode(dataset,split='train')
+    train_llm(processed_dataset)
+    chat_with_llm()
+
+if __name__ == '__main__':
+    main()
